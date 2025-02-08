@@ -82,8 +82,10 @@ def summarize_document(document_text: str) -> str:
     Le prompt demande d'extraire tous les points importants du document.
     """
     template = """
-Tu es un expert en résumé de documents. Analyse attentivement le texte ci-dessous et produis un résumé détaillé en mentionnant tous les points importants et essentiels. Sois complet et précis.
-Réponds toujours en français.
+Tu es un expert en résumé de documents. Analyse attentivement le texte ci-dessous et produis un résumé en mentionnant tous les points importants et essentiels. Sois complet et précis.
+Réponds toujours en français. tu ne dois pas afficher les noms et autres garde l'anonymat 
+si c'est un cv souligne les grands points 
+PLEASE DON'T LIE , PLEASE DON;T CREATE THINGS 
 
 Document:
 {document}
