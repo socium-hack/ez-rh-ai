@@ -91,18 +91,18 @@ def remove_thinking_tags(txt: str) -> str:
 # Génération de questions d'entretien basées sur le CV
 def generate_cv_questions(resume_text: str, num_questions: int = 5) -> str:
     prompt_template = """
-Tu es un expert en recrutement. Tu sais créer des questions d'entretien pertinentes basées sur le CV d'un candidat.
-Ne révèle pas ta chaîne de réflexion (<think>).
-Réponds toujours en français.
+You are an expert in recruitment. You know how to create relevant interview questions based on a candidate's CV.
+Do not reveal your chain-of-thought (<think>).
+You MUST always answer in French, and do NOT respond in English or Chinese.
 
-Voici le CV du candidat (anonymisé) :
+Here is the anonymized CV:
 {resume}
 
-Tâche :
-Génère {num_questions} questions d'entretien qui se concentrent sur les expériences, compétences et lacunes potentielles du candidat.
-Les questions doivent être concises et directement liées aux informations du CV.
+Task:
+Generate {num_questions} interview questions that focus on the candidate's experiences, skills, and potential gaps.
+The questions must be concise and directly linked to the CV's information.
 
-Réponse :
+Answer:
 """
     prompt_text = prompt_template.format(resume=resume_text, num_questions=num_questions)
     prompt = ChatPromptTemplate.from_template(prompt_text)
@@ -149,29 +149,27 @@ Answer:
 # Matching CV et offre d'emploi
 def analyze_match(cv_text: str, job_text: str) -> str:
     template = """
-Tu es un expert en matching entre un CV et une demande d'emploi.
-Ne révèle pas tes chain-of-thought (<think>).
-Réponds toujours en français.
+You are an expert at matching a candidate's resume (CV) to a job description. 
+However, your justification (the reasons) must come strictly from the candidate's CV. 
+Do NOT create new content, do NOT rely on or pull details from the job request. 
+You MUST always answer in French, and not in any other language.
 
-But : Évaluer la compatibilité du CV vis-à-vis du poste, 
-mais concentre-toi principalement sur le contenu du CV (compétences, expériences, etc.).
-
-Voici le CV (anonymisé) :
+Here is the anonymized CV:
 {resume}
 
-Voici la description du poste :
-{job_description}
+Task:
+1) Provide a "score" from 0 to 100 for how well this CV matches the job, 
+   but base that decision purely on the CV's content (experiences, skills, etc.).
+2) Explain that score in a single block of text (RAISONS), focusing exclusively on the CV's data.
+   If the CV lacks certain information, do not invent or infer details from the job request.
 
-Exigences pour la réponse :
-1) Donne un "score" entre 0 et 100 pour la compatibilité de ce CV avec le poste.
-2) Dans un seul bloc de texte (RAISONS), justifie ce score en t'appuyant explicitement sur le contenu du CV.
-3) Utilise ce format :
+Use this output format (in French):
 
 SCORE: XX
 RAISONS:
-Texte unique ici, un paragraphe
+[Single block of text in French, referencing only the CV content]
 
-Réponse :
+Answer:
 """
     prompt_text = template.format(resume=cv_text, job_description=job_text)
     prompt = ChatPromptTemplate.from_template(prompt_text)
@@ -195,10 +193,10 @@ def parse_matching_result(result_text: str) -> Tuple[int, str]:
 # Résumé de document
 def summarize_document(document_text: str) -> str:
     template = """
-Tu es un expert en résumé de documents. Analyse attentivement le texte ci-dessous et produis un résumé en mentionnant tous les points importants et essentiels. Sois complet et précis.
-Réponds toujours en français. tu ne dois pas afficher les noms et autres garde l'anonymat 
-si c'est un cv souligne les grands points 
-PLEASE DON'T LIE , PLEASE DON'T CREATE THINGS
+You are an expert at summarizing documents. Analyze the text below carefully and produce a summary mentioning all the important and essential points. Be thorough and precise.
+You MUST always respond in French. Do not reveal any personal names or details, and maintain anonymity.
+If it's a CV, highlight the key points.
+PLEASE DO NOT LIE, PLEASE DO NOT INVENT ANY CONTENT.
 
 Document:
 {document}
