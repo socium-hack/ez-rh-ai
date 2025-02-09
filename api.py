@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Tuple
 import uvicorn
@@ -7,7 +7,7 @@ import tempfile
 from docx import Document
 from PyPDF2 import PdfReader
 
-# Imports LangChain et Ollama
+# LangChain / DeepSeek imports
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama.llms import OllamaLLM
 from langchain_ollama import OllamaEmbeddings
@@ -35,6 +35,10 @@ class MatchingResponse(BaseModel):
 class SummarizeResponse(BaseModel):
     summary: str
 
+class FileClassification(BaseModel):
+    doc_type: str
+    justification: str
+
 # -----------------------------------------------------------------------------
 # Fonctions d'extraction de texte
 # -----------------------------------------------------------------------------
@@ -58,6 +62,9 @@ def extract_text_from_txt(txt_path: str) -> str:
         return f.read()
 
 def extract_text_from_file(upload: UploadFile) -> str:
+    """
+    Extrait le texte d'un fichier (PDF, DOCX, TXT), fallback sur txt si extension inconnue.
+    """
     suffix = upload.filename.split(".")[-1].lower() if upload.filename else "txt"
     upload.file.seek(0)
     with tempfile.NamedTemporaryFile(delete=False, suffix="." + suffix) as tmp_file:
@@ -71,10 +78,11 @@ def extract_text_from_file(upload: UploadFile) -> str:
     elif suffix == "txt":
         return extract_text_from_txt(file_path)
     else:
+        # Fallback
         return extract_text_from_txt(file_path)
 
 # -----------------------------------------------------------------------------
-# Fonction d'anonymisation et suppression du chain-of-thought
+# Anonymisation + Remove <think>
 # -----------------------------------------------------------------------------
 def anonymize_text(text: str) -> str:
     text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[EMAIL MASQUÉ]", text)
@@ -85,10 +93,10 @@ def remove_thinking_tags(txt: str) -> str:
     return re.sub(r"<think>.*?</think>", "", txt, flags=re.DOTALL).strip()
 
 # -----------------------------------------------------------------------------
-# Fonctions spécifiques aux endpoints
+# Fonctions pour chaque endpoint
 # -----------------------------------------------------------------------------
 
-# Génération de questions d'entretien basées sur le CV
+# 1) Génération de Questions d’entretien (CV)
 def generate_cv_questions(resume_text: str, num_questions: int = 5) -> str:
     prompt_template = """
 You are an expert in recruitment. You know how to create relevant interview questions based on a candidate's CV.
@@ -106,13 +114,13 @@ Answer:
 """
     prompt_text = prompt_template.format(resume=resume_text, num_questions=num_questions)
     prompt = ChatPromptTemplate.from_template(prompt_text)
-    model = OllamaLLM(model="deepseek-r1:7b")
+    model = OllamaLLM(model="deepseek-r1:7b")  # ou "deepseek-v2", etc.
     chain = prompt | model
     raw_result = chain.invoke({})
     return remove_thinking_tags(raw_result)
 
-# Q&A sur un document (RAG)
-def load_pdf(file: UploadFile) -> List:
+# 2) Q&A sur un Document PDF (RAG)
+def load_pdf(file: UploadFile):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(file.file.read())
         file_path = tmp_file.name
@@ -120,12 +128,12 @@ def load_pdf(file: UploadFile) -> List:
     return loader.load()
 
 def split_text(documents, chunk_size: int = 1000, chunk_overlap: int = 200):
-    text_splitter = RecursiveCharacterTextSplitter(
+    splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         add_start_index=True
     )
-    return text_splitter.split_documents(documents)
+    return splitter.split_documents(documents)
 
 def answer_question(question: str, documents) -> str:
     context = "\n\n".join([doc.page_content for doc in documents])
@@ -146,7 +154,7 @@ Answer:
     raw_answer = chain.invoke({"question": question, "context": context})
     return remove_thinking_tags(raw_answer)
 
-# Matching CV et offre d'emploi
+# 3) Matching CV - Offre
 def analyze_match(cv_text: str, job_text: str) -> str:
     template = """
 You are an expert at matching a candidate's resume (CV) to a job description. 
@@ -190,13 +198,14 @@ def parse_matching_result(result_text: str) -> Tuple[int, str]:
         reasons = reasons_match.group(1).strip()
     return score, reasons
 
-# Résumé de document
+# 4) Résumé de document
 def summarize_document(document_text: str) -> str:
-    template = """
-You are an expert at summarizing documents. Analyze the text below carefully and produce a summary mentioning all the important and essential points. Be thorough and precise.
+    template = r"""
+You are an expert at summarizing documents. Analyze the text below carefully and produce a summary 
+mentioning all the important and essential points. Be thorough and precise.
 You MUST always respond in French. Do not reveal any personal names or details, and maintain anonymity.
 If it's a CV, highlight the key points.
-PLEASE DO NOT LIE, PLEASE DO NOT INVENT ANY CONTENT.
+PLEASE DO NOT LIE, PLEASE DO NOT INVENT ANY CONTENT. PLEASE BE CONCISE.
 
 Document:
 {document}
@@ -210,12 +219,58 @@ Résumé:
     raw_summary = chain.invoke({})
     return remove_thinking_tags(raw_summary)
 
+# 5) Classification de Document RH
+def classify_document(doc_text: str) -> str:
+    """
+    Classer (CV, lettre de motivation, offre d’emploi, autre doc RH).
+    Réponse en français.
+    """
+    classification_prompt = r"""
+You are an expert in HR document classification. We provide you a text from a file.
+You MUST always respond in French.
+Classify this text into one of these categories:
+- "CV" (si le document ressemble à un résumé de profil, expériences, compétences)
+- "Lettre de motivation"
+- "Offre d’emploi"
+- "Autre document RH" (if none of the above match)
+
+You must also provide a short justification (in French) referencing the text content,
+but do not reveal chain-of-thought (<think>).
+
+Format output strictly as:
+
+DOC_TYPE: [one of: CV, Lettre de motivation, Offre d’emploi, Autre document RH]
+JUSTIFICATION:
+[Single short paragraph in French]
+
+Document text:
+{doc_text}
+
+Answer:
+"""
+    prompt_text = classification_prompt.format(doc_text=doc_text)
+    prompt = ChatPromptTemplate.from_template(prompt_text)
+    # NOTE: ici on utilise un autre modèle (par ex. "deepseek-r1:32b") si vous le voulez
+    model = OllamaLLM(model="deepseek-r1:7b")
+    chain = prompt | model
+    raw_result = chain.invoke({})
+    return remove_thinking_tags(raw_result)
+
+def parse_classification_result(result_text: str) -> (str, str):
+    doc_type_match = re.search(r"DOC_TYPE:\s*(.*)", result_text, re.IGNORECASE)
+    doc_type = doc_type_match.group(1).strip() if doc_type_match else "Inconnu"
+
+    justification_match = re.search(r"JUSTIFICATION:\s*(.*)", result_text, re.IGNORECASE | re.DOTALL)
+    justification = justification_match.group(1).strip() if justification_match else ""
+
+    return doc_type, justification
+
 # -----------------------------------------------------------------------------
 # Création de l'application FastAPI
 # -----------------------------------------------------------------------------
 app = FastAPI(
     title="API de DeepSeek HR Solutions",
-    description="Rassemblement des endpoints pour génération de questions, Q&A sur documents, matching CV et résumé de document.",
+    description="Endpoints pour génération de questions, Q&A (RAG), matching CV, résumé, et classification de documents RH.",
     version="1.0.0"
 )
 
@@ -223,65 +278,96 @@ app = FastAPI(
 # Endpoints
 # -----------------------------------------------------------------------------
 
-# 1. Génération de questions d'entretien basées sur un CV
+# (1) Génération de questions d'entretien (CV)
 @app.post("/api/generate_cv_questions", response_model=QuestionsResponse)
 async def generate_cv_questions_endpoint(
-    cv_file: UploadFile = File(..., description="CV du candidat (format PDF)"),
+    cv_file: UploadFile = File(..., description="CV du candidat (PDF, DOCX ou TXT)"),
     num_questions: Optional[int] = 5
 ) -> QuestionsResponse:
-    raw_text = extract_text_from_file(cv_file)
-    anonymized_text = anonymize_text(raw_text)
-    questions = generate_cv_questions(anonymized_text, num_questions=num_questions)
-    return QuestionsResponse(questions=questions)
+    try:
+        raw_text = extract_text_from_file(cv_file)
+        anonymized_text = anonymize_text(raw_text)
+        questions = generate_cv_questions(anonymized_text, num_questions=num_questions)
+        return QuestionsResponse(questions=questions)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Q&A sur un document (RAG)
+# (2) Q&A sur un document PDF (RAG)
 @app.post("/api/qa", response_model=QAResponse)
 async def qa_on_document(
     question: str = Form(..., description="La question à poser au document"),
     file: UploadFile = File(..., description="Le fichier PDF à interroger")
 ) -> QAResponse:
-    documents = load_pdf(file)
-    chunked_docs = split_text(documents)
-    embeddings_instance = OllamaEmbeddings(model="deepseek-r1:7b")
-    vector_store = InMemoryVectorStore(embeddings_instance)
-    vector_store.add_documents(chunked_docs)
-    related_docs = vector_store.similarity_search(question, k=3)
-    answer = answer_question(question, related_docs)
-    return QAResponse(answer=answer)
+    try:
+        documents = load_pdf(file)
+        chunked_docs = split_text(documents)
+        embeddings_instance = OllamaEmbeddings(model="deepseek-r1:32b")
+        vector_store = InMemoryVectorStore(embeddings_instance)
+        vector_store.add_documents(chunked_docs)
+        related_docs = vector_store.similarity_search(question, k=3)
+        answer = answer_question(question, related_docs)
+        return QAResponse(answer=answer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Matching CV – Offre d'emploi
+# (3) Matching CV - Offre d'emploi
 @app.post("/api/match", response_model=MatchingResponse)
 async def match_resumes(
-    job_file: UploadFile = File(..., description="Fichier décrivant l'offre d'emploi (PDF, TXT ou DOCX)"),
+    job_file: UploadFile = File(..., description="Fichier décrivant l'offre d'emploi (PDF, DOCX ou TXT)"),
     cv_files: List[UploadFile] = File(..., description="CV au format PDF, DOCX ou TXT")
 ) -> MatchingResponse:
-    job_text = extract_text_from_file(job_file)
-    results = []
-    for cv in cv_files:
-        cv_text = extract_text_from_file(cv)
-        anonymized_cv_text = anonymize_text(cv_text)
-        raw_llm = analyze_match(anonymized_cv_text, job_text)
-        score, reasons = parse_matching_result(raw_llm)
-        candidate_result = CandidateMatchResult(
-            filename=cv.filename,
-            score=score,
-            reasons=reasons
-        )
-        results.append(candidate_result)
-    sorted_results = sorted(results, key=lambda x: x.score, reverse=True)
-    return MatchingResponse(results=sorted_results)
+    try:
+        job_text = extract_text_from_file(job_file)
+        results = []
+        for cv in cv_files:
+            cv_text = extract_text_from_file(cv)
+            anonymized_cv_text = anonymize_text(cv_text)
+            # On pourrait décider de NE PAS passer job_text, 
+            # car le prompt indique de ne pas s'appuyer sur l'offre
+            raw_llm = analyze_match(anonymized_cv_text, job_text)
+            score, reasons = parse_matching_result(raw_llm)
+            candidate_result = CandidateMatchResult(
+                filename=cv.filename,
+                score=score,
+                reasons=reasons
+            )
+            results.append(candidate_result)
+        sorted_results = sorted(results, key=lambda x: x.score, reverse=True)
+        return MatchingResponse(results=sorted_results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Résumé de document
+# (4) Résumé de document
 @app.post("/api/summarize", response_model=SummarizeResponse)
-async def summarize(
+async def summarize_endpoint(
     file: UploadFile = File(..., description="Document à résumer (PDF, DOCX ou TXT)")
 ) -> SummarizeResponse:
-    document_text = extract_text_from_file(file)
-    summary = summarize_document(document_text)
-    return SummarizeResponse(summary=summary)
+    try:
+        document_text = extract_text_from_file(file)
+        summary = summarize_document(document_text)
+        return SummarizeResponse(summary=summary)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# (5) Classification de documents RH
+@app.post("/api/classify_file", response_model=FileClassification)
+async def classify_file_endpoint(
+    file: UploadFile = File(..., description="Fichier RH (PDF, DOCX, TXT)")
+) -> FileClassification:
+    """
+    Reçoit un fichier RH et classe le document: 
+    'CV', 'Lettre de motivation', 'Offre d’emploi' ou 'Autre document RH'
+    """
+    try:
+        doc_text = extract_text_from_file(file)
+        llm_result = classify_document(doc_text)
+        doc_type, justification = parse_classification_result(llm_result)
+        return FileClassification(doc_type=doc_type, justification=justification)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------------------------
-# Lancement de l'API (mode développement)
+# main
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
