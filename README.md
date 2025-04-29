@@ -1,4 +1,4 @@
-# DeepSeek HR Solutions API
+# HR Solutions API
 
 This project provides a FastAPI-based backend for HR solutions, including functionalities such as:
 
